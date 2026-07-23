@@ -55,9 +55,9 @@ final class PluginSource: GlucoseSource {
     /// - Returns: An `AnyPublisher` that emits an array of `BloodGlucose` values or an empty array if an error occurs or the timeout is reached.
     func fetch(_: DispatchTimer?) -> AnyPublisher<[BloodGlucose], Never> {
         fetchIfNeeded()
-            .filter { !$0.isEmpty }
             .first()
             .timeout(60 * 5, scheduler: processQueue, options: nil, customError: nil)
+            .replaceEmpty(with: [])
             .replaceError(with: [])
             .eraseToAnyPublisher()
     }
