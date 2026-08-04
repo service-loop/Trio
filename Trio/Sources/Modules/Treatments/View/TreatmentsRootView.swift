@@ -88,6 +88,7 @@ extension Treatments {
 
         /// Handles macro input (carb, fat, protein) in a debounced fashion.
         func handleDebouncedInput() {
+            state.invalidateBolusForecast()
             debounce?.cancel()
             debounce = DispatchWorkItem { [self] in
                 Task {
@@ -262,6 +263,7 @@ extension Treatments {
                                         .onChange(of: state.date) { _, _ in
                                             // Trigger simulation when date changes to update forecasts for backdated carbs
                                             Task {
+                                                state.invalidateBolusForecast()
                                                 // `updateForecasts()` does update the `simulatedDetermination` of type `Determination?` var on the main thread, so I can use this to pass its cob value into the bolus calc manager
                                                 await state.updateForecasts()
                                                 state.insulinCalculated = await state.calculateInsulin()
@@ -351,7 +353,10 @@ extension Treatments {
                                         ).foregroundColor(.secondary)
                                     }
                                 }
-                                .disabled(state.insulinCalculated == 0 || state.amount == state.insulinCalculated)
+                                .disabled(
+                                    state.isUpdatingForecasts || state.insulinCalculated == 0 || state.amount == state
+                                        .insulinCalculated
+                                )
                                 .buttonStyle(.bordered).padding(.trailing, -10)
                             }
 
@@ -424,6 +429,7 @@ extension Treatments {
                 configureView {
                     state.isActive = true
                     Task { @MainActor in
+                        await state.updateForecasts()
                         state.insulinCalculated = await state.calculateInsulin()
                     }
 
@@ -699,7 +705,7 @@ extension Treatments {
         }
 
         private var disableTaskButton: Bool {
-            bolusInProgressForEntry || state.addButtonPressed || limitExceeded
+            bolusInProgressForEntry || state.isUpdatingForecasts || state.addButtonPressed || limitExceeded
         }
     }
 

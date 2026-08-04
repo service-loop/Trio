@@ -110,6 +110,8 @@ extension Treatments {
         var preprocessedData: [(id: UUID, forecast: Forecast, forecastValue: ForecastValue)] = []
         var predictionsForChart: Predictions?
         var simulatedDetermination: Determination?
+        var isUpdatingForecasts: Bool = false
+        var hasCurrentBolusForecast: Bool = false
 
         var minForecast: [Int] = []
         var maxForecast: [Int] = []
@@ -431,9 +433,16 @@ extension Treatments {
 
         /// Calculate insulin recommendation
         func calculateInsulin() async -> Decimal {
-            // Safely get minPredBG on main thread
+            let isRecommendationReady = await MainActor.run { hasCurrentBolusForecast }
+            guard isRecommendationReady else {
+                return 0
+            }
+
+            // Prefer the current entry's simulated safety forecast over the last real loop's forecast.
+            // The bolus view can recalculate while a simulation is in flight; using stale minPredBG here
+            // can publish a permissive recommendation that does not match the displayed forecast.
             let localMinPredBG = await MainActor.run {
-                minPredBG
+                simulatedDetermination?.minPredBG ?? simulatedDetermination?.minPredBGFromReason ?? minPredBG
             }
 
             // Use the cob value of the simulation if we have a simulated determination
@@ -475,6 +484,11 @@ extension Treatments {
             }
 
             return apsManager.roundBolus(amount: result.insulinCalculated)
+        }
+
+        @MainActor func invalidateBolusForecast() {
+            hasCurrentBolusForecast = false
+            insulinCalculated = 0
         }
 
         // MARK: - Button tasks
@@ -918,6 +932,8 @@ extension Treatments.StateModel {
             carbsReq: 0,
             temp: nil,
             reservoir: 0,
+            minGuardBG: (determinationObject.minGuardBG ?? 0) as Decimal,
+            minPredBG: (determinationObject.minPredBG ?? determinationObject.minPredBGFromReason ?? 0) as Decimal,
             carbRatio: 0,
             received: false
         )
@@ -927,15 +943,21 @@ extension Treatments.StateModel {
 extension Treatments.StateModel {
     @MainActor func updateForecasts(with forecastData: Determination? = nil) async {
         guard isActive else {
+            debug(.bolusState, "updateForecasts not fired")
             return
-                debug(.bolusState, "updateForecasts not fired")
         }
 
-        debug(.bolusState, "updateForecasts fired")
         if let forecastData = forecastData {
             simulatedDetermination = forecastData
+            minPredBG = forecastData.minPredBG ?? forecastData.minPredBGFromReason ?? minPredBG
+            minGuardBG = forecastData.minGuardBG ?? minGuardBG
             debugPrint("\(DebuggingIdentifiers.failed) minPredBG: \(minPredBG)")
         } else {
+            debug(.bolusState, "updateForecasts fired")
+            isUpdatingForecasts = true
+            hasCurrentBolusForecast = false
+            defer { isUpdatingForecasts = false }
+
             let simulated = await Task { [self] in
                 debug(.bolusState, "calling simulateDetermineBasal to get forecast data")
                 return await apsManager.simulateDetermineBasal(
@@ -952,7 +974,9 @@ extension Treatments.StateModel {
             // Update evBG and minPredBG from simulated determination
             if let simDetermination = simulated {
                 evBG = Decimal(simDetermination.eventualBG ?? 0)
-                minPredBG = simDetermination.minPredBGFromReason ?? 0
+                minPredBG = simDetermination.minPredBG ?? simDetermination.minPredBGFromReason ?? 0
+                minGuardBG = simDetermination.minGuardBG ?? minGuardBG
+                hasCurrentBolusForecast = true
                 debugPrint("\(DebuggingIdentifiers.inProgress) minPredBG: \(minPredBG)")
             }
         }
